@@ -126,9 +126,25 @@ export async function executeOvernightReductions(
       }),
     );
 
+    // Bypass the morning spread gate. An overnight reduction is a RISK action, not a
+    // discretionary exit: it only fires on a position already over its overnight
+    // exposure cap, and the cost of not reducing is carrying that excess through the
+    // close. Gating it on spread inverts the intent — the illiquid, wide-spread names
+    // are exactly the ones you least want to hold oversized overnight.
+    //
+    // Observed: SGML sat over-cap for THREE sessions (2026-08-05 -> 08-07) while the
+    // bot made ~82 reduction attempts per day; 79 of them were rejected with "Morning
+    // spread gate active" (60.5% -> 33.6% spread vs a 25-30% cap). Its quantity and
+    // cost basis never moved.
+    //
+    // Deliberately forceThroughSpreadGate and NOT isUrgentClose: urgency additionally
+    // disables the mid floor (see midFloorApplies), and a reduction has no reason to
+    // concede the whole spread. This bypasses the gate while leaving price protection
+    // exactly as it is. Mirrors ee729f1, which did the same for stop-loss exits.
     const closeResults = await closePosition(accountNumber, evaluation, {
       maxQuantityToClose: contractsToClose,
       orderSource: OVERNIGHT_REDUCTION_ORDER_SOURCE,
+      forceThroughSpreadGate: true,
     });
 
     for (const r of closeResults) {

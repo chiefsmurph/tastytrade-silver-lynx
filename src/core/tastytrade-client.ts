@@ -1,4 +1,5 @@
 import TastytradeClient from "@tastytrade/api";
+import { describeOrderError } from "~/core/tastytrade-order-service";
 import { config } from "dotenv";
 import { assertNotReadOnly } from "./read-only-accounts";
 import type { TypedOrderService } from "./tastytrade-order-service";
@@ -95,6 +96,48 @@ tastytradeApi.balancesAndPositionsService.getAccountBalanceValues = async (
   return accountBalance;
 };
 
+// Broker rejection logging at the same chokepoint.
+//
+// `createTypedOrderService` already logs `order-service-error` WITH the response
+// body — but it "is never invoked in the wiring" (see below), so that logger has
+// never once fired in production. Two days of identical HTTP 422s on the same
+// close (SGML, 2026-08-06/07) were reported as bare "status code 422" with the
+// broker's reason discarded, because close-position's catch only reads
+// `err.message`. Log it HERE, where every mutating call actually passes, so the
+// reason survives for any path — close, seed, allocation, or manual IPC.
+const logOrderFailure = (
+  call: string,
+  accountNumber: string,
+  error: unknown,
+): void => {
+  const { status, body } = describeOrderError(error);
+  console.error(
+    JSON.stringify({
+      scope: "order-service-error",
+      call,
+      accountNumber,
+      status,
+      body,
+      message: error instanceof Error ? error.message : String(error),
+    }),
+  );
+};
+
+// Rethrows unchanged — this is observability only, every caller's error handling
+// (the tick-chase 422 break, seed skip paths) behaves exactly as before.
+const withOrderFailureLog = async <T>(
+  call: string,
+  accountNumber: string,
+  run: () => Promise<T>,
+): Promise<T> => {
+  try {
+    return await run();
+  } catch (error) {
+    logOrderFailure(call, accountNumber, error);
+    throw error;
+  }
+};
+
 // Read-only enforcement at the broker chokepoint.
 //
 // The production `orderService` is the raw SDK client (createTypedOrderService
@@ -121,7 +164,9 @@ const rawEditOrder = tastytradeApi.orderService.editOrder.bind(
 
 tastytradeApi.orderService.createOrder = ((accountNumber: string, order) => {
   assertNotReadOnly(accountNumber);
-  return rawCreateOrder(accountNumber, order);
+  return withOrderFailureLog("createOrder", accountNumber, () =>
+    rawCreateOrder(accountNumber, order),
+  );
 }) as typeof tastytradeApi.orderService.createOrder;
 
 tastytradeApi.orderService.replaceOrder = ((
@@ -130,7 +175,9 @@ tastytradeApi.orderService.replaceOrder = ((
   replacementOrder,
 ) => {
   assertNotReadOnly(accountNumber);
-  return rawReplaceOrder(accountNumber, orderId, replacementOrder);
+  return withOrderFailureLog("replaceOrder", accountNumber, () =>
+    rawReplaceOrder(accountNumber, orderId, replacementOrder),
+  );
 }) as typeof tastytradeApi.orderService.replaceOrder;
 
 tastytradeApi.orderService.createComplexOrder = ((
@@ -138,7 +185,9 @@ tastytradeApi.orderService.createComplexOrder = ((
   order,
 ) => {
   assertNotReadOnly(accountNumber);
-  return rawCreateComplexOrder(accountNumber, order);
+  return withOrderFailureLog("createComplexOrder", accountNumber, () =>
+    rawCreateComplexOrder(accountNumber, order),
+  );
 }) as typeof tastytradeApi.orderService.createComplexOrder;
 
 tastytradeApi.orderService.editOrder = ((
@@ -147,7 +196,9 @@ tastytradeApi.orderService.editOrder = ((
   order,
 ) => {
   assertNotReadOnly(accountNumber);
-  return rawEditOrder(accountNumber, orderId, order);
+  return withOrderFailureLog("editOrder", accountNumber, () =>
+    rawEditOrder(accountNumber, orderId, order),
+  );
 }) as typeof tastytradeApi.orderService.editOrder;
 
 tastytradeApi.johnsService = {

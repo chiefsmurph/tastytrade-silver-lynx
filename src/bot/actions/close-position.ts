@@ -102,9 +102,13 @@ export interface ClosePositionDependencies {
   // Account type for the execution-time strategy re-check — cutoff minutes and
   // the EOD liquidation rule differ by account type.
   accountType?: StrategyAccountType;
-  // Operator-initiated surgical close: bypass the morning spread gate so an
-  // illiquid position can be flattened on demand regardless of spread. Only the
-  // manual IPC close path sets this — the cycle never does.
+  // Bypass the morning spread gate so an illiquid position can be closed regardless
+  // of spread. Two callers, both non-discretionary:
+  //   - the manual IPC close path (operator-initiated surgical flatten)
+  //   - overnight-position-reduction (risk action on an over-cap position; see the
+  //     comment there for the 3-session SGML case that motivated it)
+  // The scheduled MANAGE/take-profit path never sets it — there the half-spread is a
+  // real cost and nothing forces the exit.
   forceThroughSpreadGate?: boolean;
   // Override the default order source tag written to the broker. Used to stamp
   // overnight-reduction sells with a distinct source so the cancel sweep can
@@ -404,8 +408,11 @@ function advanceClosePrice(
 // Places one close order, converting a broker rejection (e.g. 422 — stale/phantom
 // position, nothing to close, bad order) into `undefined` so the tick-chase loop
 // stops instead of letting the throw crash the cycle. The tastytrade error body is
-// logged by the order service (order-service-error). [preserves main afc73e8 through
-// the PR-27 runCloseTickChase extraction]
+// logged as `order-service-error` at the client chokepoint (core/tastytrade-client).
+// NOTE: that used to name createTypedOrderService, which is never wired in
+// production — so the body was silently dropped for every rejection until the
+// chokepoint logger was added. [preserves main afc73e8 through the PR-27
+// runCloseTickChase extraction]
 async function placeCloseOrder(
   accountNumber: string,
   order: OrderPayload,
